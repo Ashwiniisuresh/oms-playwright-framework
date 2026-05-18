@@ -10,29 +10,9 @@ import { users } from '../../fixtures/users';
 
 test('Duplicate Watchlist Validation', async ({ page }) => {
 
-    const loginPage = new LoginPage(page);
-
-    const otpPage = new OtpPage(page);
-
     const watchlistPage = new WatchlistPage(page);
 
-    const watchlistName = 'watchlist-dup';
-
-    // Login
-    await loginPage.gotoLoginPage();
-
-    await loginPage.login(
-        users.validUser.username,
-        users.validUser.password
-    );
-
-    // OTP
-    await otpPage.validateOtpPageLoaded();
-
-    await otpPage.enterOtp(users.validUser.otp);
-
-    // Wait for login redirection to complete
-    await expect(page).toHaveURL(/\/home\/chart/, { timeout: 15000 });
+    const watchlistName = `wl-dup-${Math.floor(100 + Math.random() * 900)}`;
 
     // Watchlist
     await watchlistPage.gotoWatchlistPage();

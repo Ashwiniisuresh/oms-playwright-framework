@@ -10,36 +10,18 @@ import { users } from '../../fixtures/users';
 
 test('Create Watchlist', async ({ page }) => {
 
-    const loginPage = new LoginPage(page);
-
-    const otpPage = new OtpPage(page);
-
     const watchlistPage = new WatchlistPage(page);
-
-    // Login
-    await loginPage.gotoLoginPage();
-
-    await loginPage.login(
-        users.validUser.username,
-        users.validUser.password
-    );
-
-    // OTP
-    await otpPage.validateOtpPageLoaded();
-
-    await otpPage.enterOtp(users.validUser.otp);
-
-    // Wait for login redirection to complete
-    await expect(page).toHaveURL(/\/home\/chart/, { timeout: 15000 });
 
     // Watchlist
     await watchlistPage.gotoWatchlistPage();
 
     await watchlistPage.validateWatchlistPageLoaded();
 
+    const watchlistName = `add-${Math.floor(1000 + Math.random() * 9000)}`;
+
     // Create Watchlist
-    await watchlistPage.createWatchlist('add1');
+    await watchlistPage.createWatchlist(watchlistName);
 
     // Validate Watchlist
-    await watchlistPage.validateWatchlistCreated('add1');
+    await watchlistPage.validateWatchlistCreated(watchlistName);
 });

@@ -9,40 +9,20 @@ import { users } from '../../fixtures/users';
 
 test('Open Buy Window', async ({ page }) => {
 
-    const loginPage = new LoginPage(page);
-
-    const otpPage = new OtpPage(page);
-
     const watchlistPage = new WatchlistPage(page);
 
     const buyOrderPage = new BuyOrderPage(page);
 
-    // Login
-    await loginPage.gotoLoginPage();
-
-    await loginPage.login(
-        users.validUser.username,
-        users.validUser.password
-    );
-
-    // OTP
-    await otpPage.validateOtpPageLoaded();
-
-    await otpPage.enterOtp(
-        users.validUser.otp
-    );
-
-    // Wait for login redirection to complete
-    await expect(page).toHaveURL(/\/home\/chart/, { timeout: 15000 });
-
     // Watchlist
     await watchlistPage.gotoWatchlistPage();
 
+    const watchlistName = `wl-window-${Math.floor(1000 + Math.random() * 9000)}`;
+
     // Create unique watchlist
-    await watchlistPage.createWatchlist('wl-window');
+    await watchlistPage.createWatchlist(watchlistName);
 
     // Select Watchlist
-    await watchlistPage.selectWatchlist('wl-window');
+    await watchlistPage.selectWatchlist(watchlistName);
 
     // Search Stock
     await watchlistPage.searchStock('1030');

@@ -126,6 +126,10 @@ async createWatchlist(watchlistName: string) {
 
     await saveButton.click();
 
+    // Close popup
+    await this.page.keyboard.press('Escape');
+    await this.page.waitForTimeout(1000);
+
     // STEP 6 → Validate
    const watchlist = this.page
     .locator('span.truncate')
@@ -224,6 +228,36 @@ async validateStockAdded(stockCode: string) {
             timeout: 20000
         });
 }
+
+async addStockIfNotExist(stockCode: string, stockName: string) {
+
+    // Allow UI table to fully fetch and render its rows
+    await this.page.waitForTimeout(3000);
+
+    const isPresent = await this.page
+        .getByText(stockCode)
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+    if (isPresent) {
+
+        console.log(`Stock ${stockCode} (${stockName}) is already present in this watchlist. Skipping add.`);
+
+        return;
+    }
+
+    console.log(`Stock ${stockCode} not found in watchlist. Adding it now.`);
+
+    await this.searchStock(stockCode);
+
+    await this.selectStock(stockName);
+
+    await this.addStock();
+
+    await this.validateStockAdded(stockCode);
+}
+
 async selectWatchlist(watchlistName: string) {
 
     // Wait small stabilization

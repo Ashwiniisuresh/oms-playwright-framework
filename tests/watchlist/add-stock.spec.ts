@@ -10,34 +10,16 @@ import { users } from '../../fixtures/users';
 
 test('Add Stock To Watchlist', async ({ page }) => {
 
-    const loginPage = new LoginPage(page);
-
-    const otpPage = new OtpPage(page);
-
     const watchlistPage = new WatchlistPage(page);
-
-    // Login
-    await loginPage.gotoLoginPage();
-
-    await loginPage.login(
-        users.validUser.username,
-        users.validUser.password
-    );
-
-    // OTP
-    await otpPage.validateOtpPageLoaded();
-
-    await otpPage.enterOtp(users.validUser.otp);
-
-    // Wait for login redirection to complete
-    await expect(page).toHaveURL(/\/home\/chart/, { timeout: 15000 });
 
     // Watchlist
     await watchlistPage.gotoWatchlistPage();
 
-    await watchlistPage.createWatchlist('growth');
+    const watchlistName = `growth-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    await watchlistPage.createWatchlist(watchlistName);
     // Select Watchlist
-    await watchlistPage.selectWatchlist('growth');
+    await watchlistPage.selectWatchlist(watchlistName);
 
     // Search Stock
     await watchlistPage.searchStock('1030');

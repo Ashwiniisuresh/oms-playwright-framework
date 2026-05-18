@@ -6,6 +6,8 @@ import { OtpPage } from '../pages/OtpPage';
 
 import { loginFlow } from '../utils/loginHelper';
 
+test.use({ storageState: { cookies: [], origins: [] } });
+
 test('Valid Login Test', async ({ page }) => {
 
     const loginPage = new LoginPage(page);

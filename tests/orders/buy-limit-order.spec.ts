@@ -9,40 +9,22 @@ import { users } from '../../fixtures/users';
 
 test('Buy Limit Order', async ({ page }) => {
 
-    const loginPage = new LoginPage(page);
-
-    const otpPage = new OtpPage(page);
+    test.setTimeout(120000);
 
     const watchlistPage = new WatchlistPage(page);
 
     const buyOrderPage = new BuyOrderPage(page);
 
-    // Login
-    await loginPage.gotoLoginPage();
-
-    await loginPage.login(
-        users.validUser.username,
-        users.validUser.password
-    );
-
-    // OTP
-    await otpPage.validateOtpPageLoaded();
-
-    await otpPage.enterOtp(
-        users.validUser.otp
-    );
-
-    // Wait for login redirection to complete
-    await expect(page).toHaveURL(/\/home\/chart/, { timeout: 15000 });
-
     // Watchlist
     await watchlistPage.gotoWatchlistPage();
 
+    const watchlistName = `wl-limit-${Math.floor(1000 + Math.random() * 9000)}`;
+
     // Create unique watchlist
-    await watchlistPage.createWatchlist('wl-limit');
+    await watchlistPage.createWatchlist(watchlistName);
 
     // Select watchlist
-    await watchlistPage.selectWatchlist('wl-limit');
+    await watchlistPage.selectWatchlist(watchlistName);
 
     // Search stock
     await watchlistPage.searchStock('1010');
@@ -69,7 +51,7 @@ test('Buy Limit Order', async ({ page }) => {
     await watchlistPage.validateWatchlistPageLoaded();
 
     // Select watchlist again since navigating away resets the active tab
-    await watchlistPage.selectWatchlist('wl-limit');
+    await watchlistPage.selectWatchlist(watchlistName);
 
     // Open Buy Window
     await watchlistPage.openBuyWindow();
@@ -85,6 +67,10 @@ test('Buy Limit Order', async ({ page }) => {
     // Limit Order
     await buyOrderPage
         .selectLimitOrder();
+
+    // Enter Quantity
+    await buyOrderPage
+        .enterQuantity('10');
 
     // Enter Price
     await buyOrderPage
