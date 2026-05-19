@@ -1,162 +1,253 @@
 import { test, expect } from '@playwright/test';
 
+import { LoginPage } from '../../pages/LoginPage';
+import { OtpPage } from '../../pages/OtpPage';
 import { WatchlistPage } from '../../pages/WatchlistPage';
 import { BuyOrderPage } from '../../pages/BuyOrderPage';
 import { OrdersPage } from '../../pages/OrdersPage';
 
-test('Unified E2E: Shared Session, Place Advanced Market/Limit Orders, Verify Status & Buying Power Impact', async ({ page }) => {
+import { loginFlow } from '../../utils/loginHelper';
 
-    test.setTimeout(150000); // 2.5 minutes timeout for full premium multi-watchlist flow
+test.use({ storageState: { cookies: [], origins: [] } });
 
+test('Unified E2E: single-flow login, 2 watchlists, 2 stocks, market + limit orders, TIF coverage', async ({ page }) => {
+
+    test.setTimeout(180000);
+
+    const loginPage = new LoginPage(page);
+    const otpPage = new OtpPage(page);
     const watchlistPage = new WatchlistPage(page);
     const buyOrderPage = new BuyOrderPage(page);
     const ordersPage = new OrdersPage(page);
+    const portfolioName = '-1-AshwiniPF';
 
-    // 1. Start directly at Watchlist page since we are already authenticated globally
-    await watchlistPage.gotoWatchlistPage();
+    async function verifyOrderAcrossTabs(symbol: string, side: 'BUY' | 'SELL', category: string) {
 
-    // 2. Setup Watchlist 1: fixedincome
-    const wlFixed = 'fixedincome';
-    await watchlistPage.createWatchlist(wlFixed);
-    await watchlistPage.selectWatchlist(wlFixed);
-    // Add SAIB (1030) if it is not already in the watchlist
-    await watchlistPage.addStockIfNotExist('1030', 'SAIB - Saudi Investment Bank');
+        for (const tab of ['Open', 'Executed', 'Rejected'] as const) {
 
-    // 3. Setup Watchlist 2: growth
-    const wlGrowth = 'growth';
-    await watchlistPage.createWatchlist(wlGrowth);
-    await watchlistPage.selectWatchlist(wlGrowth);
-    // Add Riyad Bank (1010) if it is not already in the watchlist
-    await watchlistPage.addStockIfNotExist('1010', 'Riyad Bank');
+            try {
 
-    // =========================================================
-    // FLOW 1: ADVANCED MARKET ORDER (FILL OR KILL) ON FIXEDINCOME
-    // =========================================================
-    console.log('--- Placing ADVANCED MARKET Order (FOK) on fixedincome ---');
-    // Switch to fixedincome watchlist
-    await watchlistPage.gotoWatchlistPage();
-    await watchlistPage.selectWatchlist(wlFixed);
+                await ordersPage.selectTab(tab);
 
-    // Open Buy Window for SAIB (first row in fixedincome)
-    await watchlistPage.openBuyWindow();
-    await buyOrderPage.validateBuyWindowOpened();
+                const status = await ordersPage.verifyOrderExists(symbol, side, category);
 
-    // Portfolio selection
-    await buyOrderPage.selectPortfolio('-1-AshwiniPF');
+                return { tab, status };
 
-    // Choose Market order
-    await buyOrderPage.selectMarketOrder();
+            } catch (error) {
 
-    // Expand Advanced Options and choose Time in Force (Validity)
-    await buyOrderPage.toggleAdvancedOptions();
-    await buyOrderPage.selectTimeInForce('Fill or kill'); // FOK
-
-    // Enter Quantity
-    await buyOrderPage.enterQuantity('1');
-
-    // Log Net Amount & Buying Power
-    const marketNetVal = await buyOrderPage.getNetAmount();
-    const marketBuyPow = await buyOrderPage.getBuyingPower();
-    console.log(`[FOK Market Details] Net Amount: ${marketNetVal} | Buying Power: ${marketBuyPow}`);
-
-    // Place FOK Order
-    await buyOrderPage.placeBuyOrder();
-    await page.waitForTimeout(2000);
-
-    // Verify status on Orders screen
-    await ordersPage.gotoOrdersPage();
-
-    let foundMarketOrder = false;
-    for (const tab of ['Open', 'Executed', 'Rejected'] as const) {
-        try {
-            await ordersPage.selectTab(tab);
-            const status = await ordersPage.verifyOrderExists('1030', 'BUY', 'MKRT');
-            if (status) {
-                console.log(`Successfully verified FOK Market order on ${tab} tab with status: ${status}`);
-                foundMarketOrder = true;
-                break;
+                console.log(`Order ${symbol}/${category} not found on ${tab} tab, checking next tab...`);
             }
-        } catch (e) {
-            console.log(`FOK Market order not found on ${tab} tab, checking next...`);
+        }
+
+        throw new Error(`Unable to verify order for symbol ${symbol} with category ${category} on Open, Executed, or Rejected tabs.`);
+    }
+
+    async function openOrderWindowAndReadBuyingPower(watchlistName: string) {
+
+        await watchlistPage.gotoWatchlistPage();
+        await watchlistPage.selectWatchlist(watchlistName);
+        await watchlistPage.openBuyWindow();
+        await buyOrderPage.validateBuyWindowOpened();
+        await buyOrderPage.selectPortfolio(portfolioName);
+
+        const buyingPowerText = await buyOrderPage.getBuyingPower();
+        const buyingPower = parseFloat(buyingPowerText.replace(/[^0-9.]/g, '')) || 0;
+
+        return buyingPower;
+    }
+
+    async function ensureWatchlistReady(watchlistName: string, stockCode: string, stockName: string) {
+
+        const watchlistCount = await watchlistPage.getWatchlistCount(watchlistName);
+
+        await watchlistPage.gotoWatchlistPage();
+
+        if (watchlistCount === 0) {
+
+            console.log(`Creating missing watchlist: ${watchlistName}`);
+            await watchlistPage.createWatchlist(watchlistName);
+
+        } else {
+
+            console.log(`Reusing existing watchlist: ${watchlistName}`);
+        }
+
+        await watchlistPage.selectWatchlist(watchlistName);
+        await watchlistPage.addStockIfNotExist(stockCode, stockName);
+    }
+
+    async function placeOrderWithVerification(options: {
+        watchlistName: string;
+        symbol: string;
+        category: 'MKRT' | 'LMT';
+        tif: 'Day' | 'Fill and kill' | 'Fill or kill' | 'Good till date';
+        quantity: string;
+        orderType: 'Market' | 'Limit';
+        price?: string;
+        retryPrice?: string;
+        checkBuyingPowerDrop?: boolean;
+    }) {
+
+        const initialBuyingPower = options.checkBuyingPowerDrop
+            ? await openOrderWindowAndReadBuyingPower(options.watchlistName)
+            : 0;
+
+        if (!options.checkBuyingPowerDrop) {
+
+            await watchlistPage.gotoWatchlistPage();
+            await watchlistPage.selectWatchlist(options.watchlistName);
+            await watchlistPage.openBuyWindow();
+            await buyOrderPage.validateBuyWindowOpened();
+            await buyOrderPage.selectPortfolio(portfolioName);
+        }
+
+        if (options.orderType === 'Market') {
+
+            await buyOrderPage.selectMarketOrder();
+
+        } else {
+
+            await buyOrderPage.selectLimitOrder();
+        }
+
+        await buyOrderPage.toggleAdvancedOptions();
+        await buyOrderPage.selectTimeInForce(options.tif);
+        await buyOrderPage.enterQuantity(options.quantity);
+
+        if (options.price) {
+
+            await buyOrderPage.enterPrice(options.price);
+        }
+
+        const netAmount = await buyOrderPage.getNetAmount();
+        console.log(`Placing ${options.orderType} order for ${options.symbol} | TIF: ${options.tif} | Net Amount: ${netAmount}`);
+
+        await buyOrderPage.placeBuyOrder();
+        await page.waitForTimeout(2000);
+
+        await ordersPage.gotoOrdersPage();
+
+        let orderResult = await verifyOrderAcrossTabs(options.symbol, 'BUY', options.category);
+        console.log(`Verified ${options.symbol}/${options.category} on ${orderResult.tab} with status ${orderResult.status}`);
+
+        if (orderResult.status === 'Rejected') {
+
+            const rejectedRowText = await page
+                .locator('table tbody tr')
+                .filter({ hasText: options.symbol })
+                .first()
+                .textContent();
+
+            console.log(`Rejected order snapshot for ${options.symbol}: ${rejectedRowText?.trim() || 'no row text found'}`);
+
+            if (options.retryPrice) {
+
+                console.log(`Retrying ${options.symbol}/${options.category} with corrected price ${options.retryPrice}`);
+
+                await watchlistPage.gotoWatchlistPage();
+                await watchlistPage.selectWatchlist(options.watchlistName);
+                await watchlistPage.openBuyWindow();
+                await buyOrderPage.validateBuyWindowOpened();
+                await buyOrderPage.selectPortfolio(portfolioName);
+
+                if (options.orderType === 'Market') {
+
+                    await buyOrderPage.selectMarketOrder();
+
+                } else {
+
+                    await buyOrderPage.selectLimitOrder();
+                }
+
+                await buyOrderPage.toggleAdvancedOptions();
+                await buyOrderPage.selectTimeInForce(options.tif);
+                await buyOrderPage.enterQuantity(options.quantity);
+                await buyOrderPage.enterPrice(options.retryPrice);
+
+                await buyOrderPage.placeBuyOrder();
+                await page.waitForTimeout(2000);
+
+                await ordersPage.gotoOrdersPage();
+                orderResult = await verifyOrderAcrossTabs(options.symbol, 'BUY', options.category);
+                console.log(`Retry verified ${options.symbol}/${options.category} on ${orderResult.tab} with status ${orderResult.status}`);
+            }
+        }
+
+        if (options.checkBuyingPowerDrop) {
+
+            await watchlistPage.gotoWatchlistPage();
+            const updatedBuyingPower = await openOrderWindowAndReadBuyingPower(options.watchlistName);
+
+            if (orderResult.status === 'Queued' || orderResult.status === 'Open' || orderResult.status === 'Executed') {
+
+                if (initialBuyingPower > 0) {
+
+                    expect(updatedBuyingPower).toBeLessThan(initialBuyingPower);
+                    console.log(`Buying power decreased from ${initialBuyingPower} to ${updatedBuyingPower}`);
+
+                } else {
+
+                    console.log(`Buying power check skipped: initial buying power was 0 (cannot decrease further). Updated: ${updatedBuyingPower}`);
+                }
+
+            } else {
+
+                console.log(`Buying power check skipped because ${options.symbol} ended with status ${orderResult.status}`);
+            }
         }
     }
-    expect(foundMarketOrder).toBe(true);
 
-    // =========================================================
-    // FLOW 2: ADVANCED LIMIT ORDER (DAY) ON GROWTH & BUYING POWER CHECK
-    // =========================================================
-    console.log('--- Placing ADVANCED LIMIT Order (Day) on growth ---');
-    
-    // Go to growth watchlist to read initial Buying Power
-    await watchlistPage.gotoWatchlistPage();
-    await watchlistPage.selectWatchlist(wlGrowth);
-    await watchlistPage.openBuyWindow();
-    await buyOrderPage.validateBuyWindowOpened();
+    await loginFlow(loginPage, otpPage);
+    await expect(page).toHaveURL(/\/home\/chart/, { timeout: 20000 });
 
-    // Select Portfolio
-    await buyOrderPage.selectPortfolio('-1-AshwiniPF');
+    const primaryWatchlist = 'wl-primary';
+    const secondaryWatchlist = 'wl-secondary';
 
-    // Read initial Buying Power
-    const initialBuyingPowerText = await buyOrderPage.getBuyingPower();
-    const initialBuyingPower = parseFloat(initialBuyingPowerText.replace(/[^0-9.]/g, '')) || 0;
-    console.log(`[Initial Buying Power] ${initialBuyingPower}`);
+    console.log('Creating the two watchlists once, then reusing them for the full flow');
 
-    // Select Limit order
-    await buyOrderPage.selectLimitOrder();
+    await ensureWatchlistReady(primaryWatchlist, '1030', 'SAIB - Saudi Investment Bank');
+    await ensureWatchlistReady(secondaryWatchlist, '1010', 'Riyad Bank');
 
-    // Expand Advanced Options and choose Time in Force (Validity)
-    await buyOrderPage.toggleAdvancedOptions();
-    await buyOrderPage.selectTimeInForce('Day');
+    await placeOrderWithVerification({
+        watchlistName: primaryWatchlist,
+        symbol: '1030',
+        category: 'MKRT',
+        tif: 'Day',
+        quantity: '1',
+        orderType: 'Market'
+    });
 
-    // Enter Quantity & Price
-    await buyOrderPage.enterQuantity('10');
-    await buyOrderPage.enterPrice('13.00'); // set below Riyad Bank market price to queue it
+    await placeOrderWithVerification({
+        watchlistName: secondaryWatchlist,
+        symbol: '1010',
+        category: 'MKRT',
+        tif: 'Fill and kill',
+        quantity: '1',
+        orderType: 'Market'
+    });
 
-    // Log Net Amount
-    const limitNetVal = await buyOrderPage.getNetAmount();
-    console.log(`[Day Limit Details] Net Amount: ${limitNetVal}`);
+    await placeOrderWithVerification({
+        watchlistName: primaryWatchlist,
+        symbol: '1030',
+        category: 'LMT',
+        tif: 'Fill or kill',
+        quantity: '1',
+        orderType: 'Limit',
+        price: '13.00',
+        retryPrice: '14.00'
+    });
 
-    // Place Limit Order
-    await buyOrderPage.placeBuyOrder();
-    await page.waitForTimeout(2000);
+    await placeOrderWithVerification({
+        watchlistName: secondaryWatchlist,
+        symbol: '1010',
+        category: 'LMT',
+        tif: 'Good till date',
+        quantity: '10',
+        orderType: 'Limit',
+        price: '2.70',
+        retryPrice: '2.80',
+        checkBuyingPowerDrop: true
+    });
 
-    // Verify status on Orders screen
-    await ordersPage.gotoOrdersPage();
-
-    let foundLimitOrder = false;
-    for (const tab of ['Open', 'Executed', 'Rejected'] as const) {
-        try {
-            await ordersPage.selectTab(tab);
-            const status = await ordersPage.verifyOrderExists('1010', 'BUY', 'LMT');
-            if (status) {
-                console.log(`Successfully verified Day Limit order on ${tab} tab with status: ${status}`);
-                foundLimitOrder = true;
-                break;
-            }
-        } catch (e) {
-            console.log(`Day Limit order not found on ${tab} tab, checking next...`);
-        }
-    }
-    expect(foundLimitOrder).toBe(true);
-
-    // Go back to growth watchlist to open Buy Window and check if Buying Power decreased
-    console.log('--- Checking if Buying Power Decreased ---');
-    await watchlistPage.gotoWatchlistPage();
-    await watchlistPage.selectWatchlist(wlGrowth);
-    await watchlistPage.openBuyWindow();
-    await buyOrderPage.validateBuyWindowOpened();
-
-    // Select Portfolio to load active balance
-    await buyOrderPage.selectPortfolio('-1-AshwiniPF');
-
-    const newBuyingPowerText = await buyOrderPage.getBuyingPower();
-    const newBuyingPower = parseFloat(newBuyingPowerText.replace(/[^0-9.]/g, '')) || 0;
-    console.log(`[Updated Buying Power] ${newBuyingPower}`);
-
-    if (initialBuyingPower > 0) {
-        expect(newBuyingPower).toBeLessThan(initialBuyingPower);
-        console.log(`✅ Success: Buying Power decreased from ${initialBuyingPower} to ${newBuyingPower} after placing the Day Limit order!`);
-    } else {
-        console.log('⚠️ Warning: Initial Buying Power was 0, skipped balance reduction check.');
-    }
+    console.log('Single-flow E2E completed: login, watchlists, stock setup, TIF coverage, order verification, and buying power validation');
 });

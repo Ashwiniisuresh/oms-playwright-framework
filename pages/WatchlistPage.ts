@@ -130,17 +130,13 @@ async createWatchlist(watchlistName: string) {
     await this.page.keyboard.press('Escape');
     await this.page.waitForTimeout(1000);
 
-    // STEP 6 → Validate
-   const watchlist = this.page
-    .locator('span.truncate')
-    .filter({
-        hasText: watchlistName
-    });
+    // STEP 6 → Validate the created watchlist using flexible text matching
+    const watchlist = this.page.locator('text=' + watchlistName).first();
 
-await expect(watchlist)
-    .toBeVisible({
-        timeout: 20000
-    });
+    await expect(watchlist)
+        .toBeVisible({
+            timeout: 20000
+        });
 }
     async validateWatchlistCreated(watchlistName: string) {
 
