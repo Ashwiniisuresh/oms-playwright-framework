@@ -280,29 +280,37 @@ async selectWatchlist(watchlistName: string) {
     });
 
     await this.page.waitForTimeout(2000);
+
+    // Clear any watchlist-side drawer or modal before the next row interaction.
+    await this.page.keyboard.press('Escape');
+    await this.page.waitForTimeout(500);
 }
-async openBuyWindow() {
+    async openBuyWindowForSymbol(symbol: string) {
 
-    const row = this.page
-        .locator('table tbody tr')
-        .first();
+        // Close any lingering overlay that could intercept pointer events on the table.
+        await this.page.keyboard.press('Escape');
+        await this.page.waitForTimeout(500);
 
-    // Hover over the row to reveal action buttons
-    await row.hover();
+        const row = this.page
+            .locator('table tbody tr')
+            .filter({ hasText: symbol })
+            .first();
 
-    const buyIcon = row
-        .locator('img')
-        .first();
+        await row.hover({ force: true });
 
-    await expect(buyIcon)
-        .toBeVisible({
-            timeout: 30000
+        const buyIcon = row
+            .locator('img')
+            .first();
+
+        await expect(buyIcon)
+            .toBeVisible({
+                timeout: 30000
+            });
+
+        await buyIcon.click({
+            force: true
         });
 
-    await buyIcon.click({
-        force: true
-    });
-
-    console.log('Buy window opened');
-}
+        console.log(`Buy window opened for ${symbol}`);
+    }
 }

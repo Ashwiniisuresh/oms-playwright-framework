@@ -158,6 +158,100 @@ export class BuyOrderPage {
         console.log(`Time in Force selected: ${optionName}`);
     }
 
+    async selectGtdDate(dayLabel: string) {
+
+        const dateTrigger = this.page
+            .locator('.text-gray-500 > path')
+            .first();
+
+        await dateTrigger.click();
+
+        const dateButton = this.page
+            .getByRole('button', { name: dayLabel })
+            .first();
+
+        await expect(dateButton).toBeVisible({ timeout: 10000 });
+
+        await dateButton.click();
+
+        console.log(`GTD date selected: ${dayLabel}`);
+    }
+
+    async getValidationMessage(): Promise<string> {
+
+        const message = this.page
+            .getByText(/Price should be within|Tif date is mandatory|Time in force|TIF|market state|not allowed|not supported/i)
+            .first();
+
+        const visible = await message
+            .isVisible({ timeout: 2000 })
+            .catch(() => false);
+
+        if (!visible) {
+
+            return '';
+        }
+
+        const text = await message.textContent().catch(() => null);
+
+        return text?.trim() || '';
+    }
+
+    async resetOrderFormIfVisible() {
+
+        const resetButton = this.page
+            .getByRole('button', {
+                name: /^Reset$/i
+            })
+            .first();
+
+        const visible = await resetButton.isVisible().catch(() => false);
+
+        if (!visible) {
+
+            return;
+        }
+
+        await resetButton.click({ force: true });
+        await this.page.waitForTimeout(300);
+    }
+
+    async closeBuyModalIfOpen() {
+
+        const buyModal = this.page.locator('form.z-50').first();
+
+        const isOpen = await buyModal.isVisible().catch(() => false);
+
+        if (!isOpen) {
+
+            return;
+        }
+
+        const closeButton = this.page
+            .locator('.hidden > svg, .handle > .flex.items-center.justify-between.w-full > svg, form.z-50 button[aria-label*="close" i], form.z-50 button:has(svg)')
+            .first();
+
+        if (await closeButton.isVisible().catch(() => false)) {
+
+            await closeButton.click({ force: true }).catch(() => {});
+            await this.page.waitForTimeout(300);
+        }
+
+        if (await buyModal.isVisible().catch(() => false)) {
+
+            await this.page.keyboard.press('Escape').catch(() => {});
+            await this.page.waitForTimeout(300);
+        }
+
+        if (await buyModal.isVisible().catch(() => false)) {
+
+            await this.page.keyboard.press('Escape').catch(() => {});
+            await this.page.waitForTimeout(500);
+        }
+
+        await buyModal.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+    }
+
     async placeBuyOrder() {
 
         const buyButton = this.page

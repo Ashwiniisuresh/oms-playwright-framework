@@ -4,6 +4,11 @@ export class OrdersPage {
 
     private page: Page;
 
+    private readonly categoryLabels = {
+        MKRT: 'Market',
+        LMT: 'Limit'
+    } as const;
+
     constructor(page: Page) {
 
         this.page = page;
@@ -30,43 +35,74 @@ export class OrdersPage {
 
     async selectTab(tabName: 'Open' | 'Executed' | 'Rejected') {
 
-        // Locate tab using partial text matching or direct matching (e.g. "Open 2", "Rejected 11")
+        // Use exact matching so we do not click row text like "Market Rejected".
         const tabButton = this.page
-            .getByText(tabName)
+            .getByText(tabName, { exact: true })
             .first();
 
         await expect(tabButton).toBeVisible({ timeout: 15000 });
 
-        await tabButton.click();
+        await tabButton.click({ force: true });
 
         await this.page.waitForTimeout(2000); // Let the tab transition and load data
 
         console.log(`Tab ${tabName} selected`);
     }
 
-    async verifyOrderExists(symbol: string, side: 'BUY' | 'SELL', category: string): Promise<string> {
+    async verifyOrderExists(symbol: string, side: 'BUY' | 'SELL', category: 'MKRT' | 'LMT', options?: { timeout?: number }): Promise<string> {
 
-        // Find row that contains the symbol (e.g., "1030" or "1010")
+        const displayCategory = this.categoryLabels[category];
+
+        // Find row that contains the symbol (e.g., "1030" or "1010") and the specific category
         const row = this.page
             .locator('table tbody tr')
             .filter({ hasText: symbol })
+            .filter({ hasText: displayCategory })
             .first();
 
-        await expect(row).toBeVisible({ timeout: 15000 });
+        await expect(row).toBeVisible({ timeout: options?.timeout ?? 15000 });
 
-        // Assert Side and Category are present in the row
-        await expect(row.getByText(side)).toBeVisible();
+        // Assert fixed columns directly so status text like "Market Rejected" does not interfere.
+        const symbolCell = row.locator('td').nth(0);
+        const statusCell = row.locator('td').nth(1);
+        const sideCell = row.locator('td').nth(2);
+        const categoryCell = row.locator('td').nth(3);
+        const orderNumberCell = row.locator('td').nth(4);
 
-        await expect(row.getByText(category)).toBeVisible();
+        await expect(symbolCell).toContainText(symbol, { timeout: 15000 });
+        await expect(sideCell).toHaveText(side, { timeout: 15000 });
+        await expect(categoryCell).toHaveText(displayCategory, { timeout: 15000 });
 
         // Retrieve and log the status (e.g. Queued, Rejected, Executed, etc.)
-        const statusElement = row.locator('td').nth(1); // column 2 (Symbol=col0, Status=col1)
-        const status = await statusElement.textContent();
+        const status = await statusCell.textContent();
+        const orderNum = await orderNumberCell.textContent();
 
-        const orderNum = await row.locator('td').nth(4).textContent(); // column 5 (Order Number)
+        const normalizedStatus = this.normalizeStatus(status);
 
-        console.log(`Order for ${symbol} found (Order #${orderNum?.trim()}). Status: ${status?.trim()}`);
+        console.log(`Order for ${symbol} found (Order #${orderNum?.trim()}). Status: ${normalizedStatus}`);
 
-        return status?.trim() || '';
+        return normalizedStatus;
+    }
+
+    private normalizeStatus(status: string | null): string {
+
+        const value = status?.trim() || '';
+
+        if (/rejected/i.test(value)) {
+
+            return 'Rejected';
+        }
+
+        if (/executed/i.test(value)) {
+
+            return 'Executed';
+        }
+
+        if (/open/i.test(value)) {
+
+            return 'Open';
+        }
+
+        return value;
     }
 }
