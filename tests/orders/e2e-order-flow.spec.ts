@@ -14,13 +14,43 @@ interface TestResult {
     testType: 'BUY MKRT' | 'BUY LMT' | 'SELL MKRT' | 'SELL LMT';
     tif: string;
     status: 'PASS' | 'FAIL' | 'SKIPPED';
-    submittedPrice: string;
-    orderStatus: string;
+    originalPrice: string;
+    rejectionReason: string;
+    correctedPrice: string;
+    finalStatus: string;
     powerBefore: string;
     powerAfter: string;
     holdingsBefore?: string;
     holdingsAfter?: string;
     details: string;
+}
+
+function parseRejectionPrice(message: string): string | null {
+    // 1. "cannot be less than X"
+    let match = message.match(/cannot be less than\s+([0-9]+(?:\.[0-9]+)?)/i);
+    if (match) return match[1];
+
+    // 2. "cannot be greater than X"
+    match = message.match(/cannot be greater than\s+([0-9]+(?:\.[0-9]+)?)/i);
+    if (match) return match[1];
+
+    // 3. "must be between X and Y"
+    match = message.match(/between\s+([0-9]+(?:\.[0-9]+)?)\s+and\s+([0-9]+(?:\.[0-9]+)?)/i);
+    if (match) return match[1];
+
+    // 4. "must be within X and Y"
+    match = message.match(/within\s+([0-9]+(?:\.[0-9]+)?)\s+and\s+([0-9]+(?:\.[0-9]+)?)/i);
+    if (match) return match[1];
+
+    // 5. Generic "than X"
+    match = message.match(/than\s+([0-9]+(?:\.[0-9]+)?)/i);
+    if (match) return match[1];
+
+    // 6. Generic decimal number
+    match = message.match(/([0-9]+\.[0-9]+)/);
+    if (match) return match[1];
+
+    return null;
 }
 
 test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, Orders, Holdings & Selling Power', async ({ page }) => {
@@ -75,8 +105,8 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
                 await ordersPage.selectTab(tab);
                 const found = await ordersPage.verifyOrderExists(symbol, side, category, { timeout: 4000 }).catch(() => null);
                 if (found) {
-                    console.log(`✓ Order verified in ${tab} tab with status: ${found}`);
-                    return { tab, status: found };
+                    console.log(`✓ Order verified in ${tab} tab with status: ${found.normalizedStatus}`);
+                    return { tab, status: found.normalizedStatus, rawStatus: found.rawStatus, orderNumber: found.orderNumber };
                 }
             } catch (e) {
                 continue;
@@ -114,8 +144,10 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             testType: options.category === 'MKRT' ? 'BUY MKRT' : 'BUY LMT',
             tif: options.tif,
             status: 'FAIL',
-            submittedPrice: options.price || 'Market',
-            orderStatus: 'N/A',
+            originalPrice: options.price || 'Market',
+            rejectionReason: 'None',
+            correctedPrice: 'N/A',
+            finalStatus: 'N/A',
             powerBefore: 'N/A',
             powerAfter: 'N/A',
             details: ''
@@ -212,7 +244,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
                     const match = lastValidationMessage.match(/within\s+([0-9]+(?:\.[0-9]+)?)\s+and\s+([0-9]+(?:\.[0-9]+)?)/i);
                     if (match) {
                         attemptState.price = Number(match[1]).toFixed(2);
-                        resultItem.submittedPrice = attemptState.price;
+                        resultItem.correctedPrice = attemptState.price;
                         console.log(`[BUY] Retrying with midpoint validation price: ${attemptState.price}`);
                         continue;
                     }
@@ -220,6 +252,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
 
                 console.log(`[BUY] Skipping due to validation: ${lastValidationMessage}`);
                 resultItem.status = 'SKIPPED';
+                resultItem.rejectionReason = lastValidationMessage;
                 resultItem.details = `Validation: ${lastValidationMessage}`;
                 resultsTable.push(resultItem);
                 return;
@@ -228,6 +261,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             if (lastValidationMessage) {
                 console.log(`[BUY] Skipping because validation persisted: ${lastValidationMessage}`);
                 resultItem.status = 'SKIPPED';
+                resultItem.rejectionReason = lastValidationMessage;
                 resultItem.details = `Validation Persisted: ${lastValidationMessage}`;
                 resultsTable.push(resultItem);
                 return;
@@ -237,8 +271,65 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             await ensureActivePage();
             await ordersPage.gotoOrdersPage();
 
-            const orderResult = await verifyOrderAnywhere(options.symbol, 'BUY', options.category);
-            resultItem.orderStatus = orderResult.status;
+            let orderResult = await verifyOrderAnywhere(options.symbol, 'BUY', options.category);
+            let finalStatus = orderResult.status;
+
+            if (orderResult.status === 'Rejected' && 
+                (/(?:295|price limit|cannot be less than|cannot be greater than)/i.test(orderResult.rawStatus))) {
+                
+                resultItem.rejectionReason = orderResult.rawStatus;
+                console.log(`[BUY] Detected exchange price limit rejection: ${orderResult.rawStatus}`);
+                
+                // Parse allowed exchange price limit
+                const allowedPrice = parseRejectionPrice(orderResult.rawStatus);
+                if (allowedPrice) {
+                    resultItem.correctedPrice = allowedPrice;
+                    console.log(`[BUY] Parsed allowed exchange price: ${allowedPrice}. Re-submitting order automatically...`);
+
+                    // Close buy modal if any and open new order placement
+                    await ensureActivePage();
+                    await watchlistPage.gotoWatchlistPage();
+                    await watchlistPage.selectWatchlist(watchlistName);
+                    await watchlistPage.openBuyWindowForSymbol(options.symbol);
+                    await buyOrderPage.validateBuyWindowOpened();
+                    await buyOrderPage.selectPortfolio(portfolioName);
+
+                    if (options.orderType === 'Market') {
+                        await buyOrderPage.selectMarketOrder();
+                    } else {
+                        await buyOrderPage.selectLimitOrder();
+                    }
+
+                    await buyOrderPage.toggleAdvancedOptions();
+                    await buyOrderPage.selectTimeInForce(options.tif);
+
+                    if (options.tif === 'Good till date' && options.gtdDate) {
+                        await buyOrderPage.selectGtdDate(options.gtdDate);
+                    }
+
+                    await buyOrderPage.enterQuantity(options.quantity);
+                    await buyOrderPage.enterPrice(allowedPrice);
+
+                    // Capture corrected form screenshot
+                    const screenshotName = `buy_${options.category.toLowerCase()}_${options.tif.toLowerCase().replace(/\s+/g, '_')}_corrected.png`;
+                    await activePage.screenshot({ path: path.join(screenshotDir, screenshotName) });
+
+                    await buyOrderPage.placeBuyOrder();
+                    await activePage.waitForTimeout(2000); // Wait for order message
+                    await buyOrderPage.closeBuyModalIfOpen();
+
+                    // Re-verify on Orders page
+                    await ensureActivePage();
+                    await ordersPage.gotoOrdersPage();
+                    const newOrderResult = await verifyOrderAnywhere(options.symbol, 'BUY', options.category);
+                    finalStatus = newOrderResult.status;
+                    console.log(`[BUY] Corrected order accepted. Status: ${finalStatus}`);
+                } else {
+                    console.log(`[BUY] Could not parse allowed price limit from rejection message.`);
+                }
+            }
+
+            resultItem.finalStatus = finalStatus;
 
             // Get Buying Power After Placement
             await watchlistPage.gotoWatchlistPage();
@@ -250,8 +341,8 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             resultItem.powerAfter = bpAfter;
             await buyOrderPage.closeBuyModalIfOpen();
 
-            resultItem.status = 'PASS';
-            resultItem.details = `Verified in ${orderResult.tab} tab successfully.`;
+            resultItem.status = finalStatus === 'Rejected' ? 'FAIL' : 'PASS';
+            resultItem.details = `Final verified status in Orders: ${finalStatus}`;
             resultsTable.push(resultItem);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -276,8 +367,10 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             testType: options.category === 'MKRT' ? 'SELL MKRT' : 'SELL LMT',
             tif: options.tif,
             status: 'FAIL',
-            submittedPrice: options.price || 'Market',
-            orderStatus: 'N/A',
+            originalPrice: options.price || 'Market',
+            rejectionReason: 'None',
+            correctedPrice: 'N/A',
+            finalStatus: 'N/A',
             powerBefore: 'N/A',
             powerAfter: 'N/A',
             holdingsBefore: 'N/A',
@@ -297,7 +390,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             const submitOrderAttempt = async (attempt: AttemptState) => {
                 await ensureActivePage();
 
-                // Get Holdings Before Placement
+                // Get Holdings Before Placement (Requirement: Navigate to Holdings before placing Sell orders)
                 await holdingsPage.gotoHoldingsPage();
                 const hbBefore = await holdingsPage.getStockHolding(options.symbol);
                 resultItem.holdingsBefore = String(hbBefore);
@@ -381,7 +474,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
                     const match = lastValidationMessage.match(/within\s+([0-9]+(?:\.[0-9]+)?)\s+and\s+([0-9]+(?:\.[0-9]+)?)/i);
                     if (match) {
                         attemptState.price = Number(match[1]).toFixed(2);
-                        resultItem.submittedPrice = attemptState.price;
+                        resultItem.correctedPrice = attemptState.price;
                         console.log(`[SELL] Retrying with midpoint validation price: ${attemptState.price}`);
                         continue;
                     }
@@ -389,6 +482,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
 
                 console.log(`[SELL] Skipping due to validation: ${lastValidationMessage}`);
                 resultItem.status = 'SKIPPED';
+                resultItem.rejectionReason = lastValidationMessage;
                 resultItem.details = `Validation: ${lastValidationMessage}`;
                 resultsTable.push(resultItem);
                 return;
@@ -397,6 +491,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             if (lastValidationMessage) {
                 console.log(`[SELL] Skipping because validation persisted: ${lastValidationMessage}`);
                 resultItem.status = 'SKIPPED';
+                resultItem.rejectionReason = lastValidationMessage;
                 resultItem.details = `Validation Persisted: ${lastValidationMessage}`;
                 resultsTable.push(resultItem);
                 return;
@@ -406,14 +501,80 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             await ensureActivePage();
             await ordersPage.gotoOrdersPage();
 
-            const orderResult = await verifyOrderAnywhere(options.symbol, 'SELL', options.category);
-            resultItem.orderStatus = orderResult.status;
+            let orderResult = await verifyOrderAnywhere(options.symbol, 'SELL', options.category);
+            let finalStatus = orderResult.status;
 
-            // Get Selling Power & Holdings After Placement
+            if (orderResult.status === 'Rejected' && 
+                (/(?:295|price limit|cannot be less than|cannot be greater than)/i.test(orderResult.rawStatus))) {
+                
+                resultItem.rejectionReason = orderResult.rawStatus;
+                console.log(`[SELL] Detected exchange price limit rejection: ${orderResult.rawStatus}`);
+                
+                // Parse allowed exchange price limit
+                const allowedPrice = parseRejectionPrice(orderResult.rawStatus);
+                if (allowedPrice) {
+                    resultItem.correctedPrice = allowedPrice;
+                    console.log(`[SELL] Parsed allowed exchange price: ${allowedPrice}. Re-submitting order automatically...`);
+
+                    // Close sell modal if any and open new order placement
+                    await ensureActivePage();
+                    await watchlistPage.gotoWatchlistPage();
+                    await watchlistPage.selectWatchlist(watchlistName);
+                    await watchlistPage.openSellWindowForSymbol(options.symbol);
+                    await sellOrderPage.validateSellWindowOpened();
+                    await sellOrderPage.selectPortfolio(portfolioName);
+
+                    if (options.orderType === 'Market') {
+                        await sellOrderPage.selectMarketOrder();
+                    } else {
+                        await sellOrderPage.selectLimitOrder();
+                    }
+
+                    await sellOrderPage.toggleAdvancedOptions();
+                    await sellOrderPage.selectTimeInForce(options.tif);
+
+                    if (options.tif === 'Good till date' && options.gtdDate) {
+                        await sellOrderPage.selectGtdDate(options.gtdDate);
+                    }
+
+                    await sellOrderPage.enterQuantity(options.quantity);
+                    await sellOrderPage.enterPrice(allowedPrice);
+
+                    // Capture corrected form screenshot
+                    const screenshotName = `sell_${options.category.toLowerCase()}_${options.tif.toLowerCase().replace(/\s+/g, '_')}_corrected.png`;
+                    await activePage.screenshot({ path: path.join(screenshotDir, screenshotName) });
+
+                    await sellOrderPage.placeSellOrder();
+                    await activePage.waitForTimeout(2000); // Wait for order message
+                    await sellOrderPage.closeSellModalIfOpen();
+
+                    // Re-verify on Orders page
+                    await ensureActivePage();
+                    await ordersPage.gotoOrdersPage();
+                    const newOrderResult = await verifyOrderAnywhere(options.symbol, 'SELL', options.category);
+                    finalStatus = newOrderResult.status;
+                    console.log(`[SELL] Corrected order accepted. Status: ${finalStatus}`);
+                } else {
+                    console.log(`[SELL] Could not parse allowed price limit from rejection message.`);
+                }
+            }
+
+            resultItem.finalStatus = finalStatus;
+
+            // Navigate to Holdings (Requirement: Navigate to Holdings after Sell Order Placement)
             await holdingsPage.gotoHoldingsPage();
             const hbAfter = await holdingsPage.getStockHolding(options.symbol);
             resultItem.holdingsAfter = String(hbAfter);
 
+            const hbBeforeNum = Number(resultItem.holdingsBefore);
+            if ((finalStatus === 'Queued' || finalStatus === 'Open') && hbBeforeNum > 0) {
+                // Verify quantity reduction if order is queued
+                await holdingsPage.validateHoldingsDecreased(options.symbol, hbBeforeNum);
+            } else {
+                console.log(`[SELL] Checked holdings after order. Previous: ${hbBeforeNum}, Current: ${hbAfter}. (No reduction verification possible if baseline is 0 or order filled/rejected)`);
+            }
+
+            // Get Selling Power After Placement
             await watchlistPage.gotoWatchlistPage();
             await watchlistPage.selectWatchlist(watchlistName);
             await watchlistPage.openSellWindowForSymbol(options.symbol);
@@ -423,8 +584,8 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             resultItem.powerAfter = spAfter;
             await sellOrderPage.closeSellModalIfOpen();
 
-            resultItem.status = 'PASS';
-            resultItem.details = `Verified in ${orderResult.tab} tab successfully. Holdings: ${resultItem.holdingsBefore} -> ${resultItem.holdingsAfter}.`;
+            resultItem.status = finalStatus === 'Rejected' ? 'FAIL' : 'PASS';
+            resultItem.details = `Final verified status in Orders: ${finalStatus}`;
             resultsTable.push(resultItem);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -467,7 +628,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
         });
     }
 
-    // Test 2: Place Limit BUY orders for ALL TIF types
+    // Test 2: Place Limit BUY orders for ALL TIF types (using high price to trigger Price Limit Rejections!)
     console.log('\n=== TEST 2: PLACING ALL LIMIT BUY ORDERS ===');
     for (const tif of tifs) {
         await placeBuyOrderWithVerification({
@@ -476,7 +637,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             tif: tif,
             quantity: '1',
             orderType: 'Limit',
-            price: tif === 'Fill and kill' || tif === 'Fill or kill' ? '2.80' : '13.10',
+            price: '15.00', // Initially too high to trigger exchange limit correction
             gtdDate: tif === 'Good till date' ? '24' : undefined
         });
     }
@@ -494,7 +655,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
         });
     }
 
-    // Test 4: Place Limit SELL orders for ALL TIF types
+    // Test 4: Place Limit SELL orders for ALL TIF types (using low price to trigger Price Limit Rejections!)
     console.log('\n=== TEST 4: PLACING ALL LIMIT SELL ORDERS ===');
     for (const tif of tifs) {
         await placeSellOrderWithVerification({
@@ -503,7 +664,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
             tif: tif,
             quantity: '1',
             orderType: 'Limit',
-            price: '15.00',
+            price: '1.60', // Initially too low to trigger exchange limit correction
             gtdDate: tif === 'Good till date' ? '24' : undefined
         });
     }
@@ -523,13 +684,13 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
     reportContent += `**Pre-flow baseline holdings**: ${baselineHoldings}\n`;
     reportContent += `**Post-flow baseline holdings**: ${postFlowHoldings}\n\n`;
     reportContent += `## Test Case Execution Summary Table\n\n`;
-    reportContent += `| # | Test Group | TIF Type | Price Placed | Submitted Status | Buying/Selling Power (Before -> After) | Holdings (Before -> After) | Result | Details |\n`;
-    reportContent += `|---|------------|----------|--------------|------------------|----------------------------------------|----------------------------|--------|---------|\n`;
+    reportContent += `| # | Order Type | TIF | Original Price | Rejection Reason | Corrected Price | Final Status | Buying/Selling Power (Before -> After) | Holdings (Before -> After) | Result | Details |\n`;
+    reportContent += `|---|------------|-----|----------------|------------------|-----------------|--------------|----------------------------------------|----------------------------|--------|---------|\n`;
 
     resultsTable.forEach((item, index) => {
         const hbBefore = item.holdingsBefore || 'N/A';
         const hbAfter = item.holdingsAfter || 'N/A';
-        reportContent += `| ${index + 1} | **${item.testType}** | ${item.tif} | ${item.submittedPrice} | ${item.orderStatus} | ${item.powerBefore} -> ${item.powerAfter} | ${hbBefore} -> ${hbAfter} | **${item.status}** | ${item.details} |\n`;
+        reportContent += `| ${index + 1} | **${item.testType}** | ${item.tif} | ${item.originalPrice} | ${item.rejectionReason} | ${item.correctedPrice} | ${item.finalStatus} | ${item.powerBefore} -> ${item.powerAfter} | ${hbBefore} -> ${hbAfter} | **${item.status}** | ${item.details} |\n`;
     });
 
     reportContent += `\n\n## Captured Screenshots\n`;

@@ -53,7 +53,12 @@ export class OrdersPage {
         console.log(`Tab ${tabName} selected`);
     }
 
-    async verifyOrderExists(symbol: string, side: 'BUY' | 'SELL', category: 'MKRT' | 'LMT', options?: { timeout?: number }): Promise<string> {
+    async verifyOrderExists(
+        symbol: string,
+        side: 'BUY' | 'SELL',
+        category: 'MKRT' | 'LMT',
+        options?: { timeout?: number }
+    ): Promise<{ normalizedStatus: string; rawStatus: string; orderNumber: string }> {
 
         const displayCategory = this.categoryLabels[category];
 
@@ -85,12 +90,17 @@ export class OrdersPage {
         // Retrieve and log the status (e.g. Queued, Rejected, Executed, etc.)
         const status = await statusCell.textContent();
         const orderNum = await orderNumberCell.textContent();
+        const description = await row.locator('td').last().textContent().catch(() => '');
 
         const normalizedStatus = this.normalizeStatus(status);
 
-        console.log(`Order for ${symbol} found (Order #${orderNum?.trim()}). Status: ${normalizedStatus}`);
+        console.log(`Order for ${symbol} found (Order #${orderNum?.trim()}). Status: ${normalizedStatus}. Description: ${description?.trim()}`);
 
-        return normalizedStatus;
+        return {
+            normalizedStatus,
+            rawStatus: description?.trim() || status?.trim() || '',
+            orderNumber: orderNum?.trim() || ''
+        };
     }
 
     private normalizeStatus(status: string | null): string {
