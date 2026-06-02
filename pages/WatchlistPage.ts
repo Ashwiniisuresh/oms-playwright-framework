@@ -55,7 +55,7 @@ export class WatchlistPage {
 async gotoWatchlistPage() {
     const watchlistLink = this.page.getByRole('link', { name: 'Watchlist' });
     if (await watchlistLink.isVisible().catch(() => false)) {
-        await watchlistLink.click();
+        await watchlistLink.click({ force: true });
     } else {
         await this.page.goto('watchlist', { waitUntil: 'domcontentloaded' });
     }
@@ -279,7 +279,11 @@ async selectWatchlist(watchlistName: string) {
         force: true
     });
 
-    await this.page.waitForTimeout(2000);
+    // Wait for table rows to load OR for the empty state to appear
+    await Promise.race([
+        expect(this.stockRows.first()).toBeVisible({ timeout: 5000 }),
+        expect(this.page.locator('text=No Results Found').first()).toBeVisible({ timeout: 5000 })
+    ]).catch(() => {});
 
     // Clear any watchlist-side drawer or modal before the next row interaction.
     await this.page.keyboard.press('Escape');
@@ -312,5 +316,34 @@ async selectWatchlist(watchlistName: string) {
         });
 
         console.log(`Buy window opened for ${symbol}`);
+    }
+
+    async openSellWindowForSymbol(symbol: string) {
+
+        // Close any lingering overlay that could intercept pointer events on the table.
+        await this.page.keyboard.press('Escape');
+        await this.page.waitForTimeout(500);
+
+        const row = this.page
+            .locator('table tbody tr')
+            .filter({ hasText: symbol })
+            .first();
+
+        await row.hover({ force: true });
+
+        const sellIcon = row
+            .locator('img')
+            .nth(1);
+
+        await expect(sellIcon)
+            .toBeVisible({
+                timeout: 30000
+            });
+
+        await sellIcon.click({
+            force: true
+        });
+
+        console.log(`Sell window opened for ${symbol}`);
     }
 }

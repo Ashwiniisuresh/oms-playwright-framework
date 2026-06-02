@@ -20,7 +20,7 @@ export class OrdersPage {
 
         if (await ordersLink.isVisible().catch(() => false)) {
 
-            await ordersLink.click();
+            await ordersLink.click({ force: true });
 
         } else {
 
@@ -44,7 +44,11 @@ export class OrdersPage {
 
         await tabButton.click({ force: true });
 
-        await this.page.waitForTimeout(2000); // Let the tab transition and load data
+        // Wait for table rows to load after tab change, or fallback after 1 second if the tab is empty.
+        await Promise.race([
+            expect(this.page.locator('table tbody tr').first()).toBeVisible({ timeout: 5000 }),
+            this.page.waitForTimeout(1000)
+        ]).catch(() => {});
 
         console.log(`Tab ${tabName} selected`);
     }
@@ -53,11 +57,16 @@ export class OrdersPage {
 
         const displayCategory = this.categoryLabels[category];
 
-        // Find row that contains the symbol (e.g., "1030" or "1010") and the specific category
+        // Find row that contains the symbol, the correct side, and the correct category
         const row = this.page
             .locator('table tbody tr')
             .filter({ hasText: symbol })
-            .filter({ hasText: displayCategory })
+            .filter({
+                has: this.page.locator('td').nth(2).filter({ hasText: new RegExp(`^${side}$`, 'i') })
+            })
+            .filter({
+                has: this.page.locator('td').nth(3).filter({ hasText: new RegExp(`^${displayCategory}$`, 'i') })
+            })
             .first();
 
         await expect(row).toBeVisible({ timeout: options?.timeout ?? 15000 });
@@ -71,7 +80,7 @@ export class OrdersPage {
 
         await expect(symbolCell).toContainText(symbol, { timeout: 15000 });
         await expect(sideCell).toHaveText(side, { timeout: 15000 });
-        await expect(categoryCell).toHaveText(displayCategory, { timeout: 15000 });
+        await expect(categoryCell).toHaveText(displayCategory, { timeout: 15000, ignoreCase: true });
 
         // Retrieve and log the status (e.g. Queued, Rejected, Executed, etc.)
         const status = await statusCell.textContent();

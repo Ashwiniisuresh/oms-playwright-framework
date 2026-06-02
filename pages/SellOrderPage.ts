@@ -1,6 +1,6 @@
 import { Page, expect } from '@playwright/test';
 
-export class BuyOrderPage {
+export class SellOrderPage {
 
     private page: Page;
 
@@ -9,44 +9,29 @@ export class BuyOrderPage {
         this.page = page;
     }
 
-    async validateBuyWindowOpened() {
+    async validateSellWindowOpened() {
 
-        const buyButton = this.page
-            .getByRole('button', {
-                name: /^Buy$/i
-            });
+        const sellButton = this.page.getByRole('button', { name: /^Sell$/i });
 
-        await expect(buyButton)
-            .toBeVisible({
-                timeout: 15000
-            });
+        await expect(sellButton).toBeVisible({ timeout: 15000 });
 
-        console.log('Buy window validated');
+        console.log('Sell window validated');
     }
 
     async selectPortfolio(portfolio: string) {
 
-        const portfolioDropdown = this.page
-            .getByRole('combobox')
-            .first();
+        const portfolioDropdown = this.page.getByRole('combobox').first();
 
         await portfolioDropdown.click();
 
-        await this.page
-            .getByText(portfolio)
-            .filter({ visible: true })
-            .first()
-            .click();
+        await this.page.getByRole('option', { name: portfolio }).click();
 
         console.log(`${portfolio} selected`);
     }
 
     async selectLimitOrder() {
 
-        const limitRadio = this.page
-            .getByRole('radio', {
-                name: 'Limit'
-            });
+        const limitRadio = this.page.getByRole('radio', { name: 'Limit' });
 
         await limitRadio.click();
 
@@ -55,34 +40,20 @@ export class BuyOrderPage {
 
     async selectMarketOrder() {
 
-        const marketRadio = this.page
-            .getByRole('radio', {
-                name: 'Market'
-            });
+        const marketRadio = this.page.getByRole('radio', { name: 'Market' });
 
         await marketRadio.click();
 
         console.log('Market order selected');
     }
 
-    async getNetAmount(): Promise<string> {
+    async getSellingPower(): Promise<string> {
 
-        const element = this.page.locator('text=Net Amount').first();
-
-        const text = await element.textContent();
-
-        console.log(`Read Net Amount: ${text?.trim()}`);
-
-        return text?.trim() || '';
-    }
-
-    async getBuyingPower(): Promise<string> {
-
-        const element = this.page.locator('text=Buying Power').first();
+        const element = this.page.locator('text=Selling Power').first();
 
         const text = await element.textContent();
 
-        console.log(`Read Buying Power: ${text?.trim()}`);
+        console.log(`Read Selling Power: ${text?.trim()}`);
 
         return text?.trim() || '';
     }
@@ -90,9 +61,7 @@ export class BuyOrderPage {
     async enterQuantity(quantity: string) {
 
         const quantityInput = this.page
-            .getByRole('spinbutton', {
-                name: 'Quantity'
-            })
+            .getByRole('spinbutton', { name: 'Quantity' })
             .or(this.page.locator('.number-input-container:has-text("Quantity") input'))
             .first();
 
@@ -106,9 +75,7 @@ export class BuyOrderPage {
     async enterPrice(price: string) {
 
         const priceInput = this.page
-            .getByRole('spinbutton', {
-                name: 'Price'
-            })
+            .getByRole('spinbutton', { name: 'Price' })
             .or(this.page.locator('.number-input-container:has-text("Price") input'))
             .first();
 
@@ -144,8 +111,6 @@ export class BuyOrderPage {
 
         await trigger.click();
 
-        await this.page.waitForTimeout(500); // let dropdown list animate
-
         const option = this.page
             .locator('div, span, li, [role="option"]')
             .filter({ hasText: optionName })
@@ -160,26 +125,53 @@ export class BuyOrderPage {
 
     async selectGtdDate(dayLabel: string) {
 
-        const dateTrigger = this.page
-            .locator('.text-gray-500 > path')
-            .first();
+        const dateTrigger = this.page.locator('.text-gray-500').first();
 
         await dateTrigger.click();
 
-        const dateButton = this.page
-            .getByRole('button', { name: dayLabel })
-            .first();
+        const targetDay = parseInt(dayLabel, 10);
+        const today = new Date();
+        const currentDay = today.getDate();
 
-        await expect(dateButton).toBeVisible({ timeout: 10000 });
+        let useCurrentMonth = false;
+        if (!isNaN(targetDay) && targetDay > currentDay) {
+            const dateButton = this.page.getByRole('button', { name: dayLabel }).first();
+            if (await dateButton.isVisible().catch(() => false)) {
+                useCurrentMonth = true;
+            }
+        }
 
-        await dateButton.click();
+        if (useCurrentMonth) {
+            const dateButton = this.page.getByRole('button', { name: dayLabel }).first();
+            await dateButton.click();
+            console.log(`GTD date selected in current month: ${dayLabel}`);
+        } else {
+            let found = false;
+            for (let i = 0; i < 3; i++) {
+                const nextMonthTrigger = this.page.locator('.text-gray-500').last();
+                await nextMonthTrigger.click({ force: true });
 
-        console.log(`GTD date selected: ${dayLabel}`);
+                const dateButton = this.page.getByRole('button', { name: dayLabel }).first();
+                if (await dateButton.isVisible().catch(() => false)) {
+                    await dateButton.click();
+                    found = true;
+                    console.log(`GTD date selected in month +${i + 1}: ${dayLabel}`);
+                    break;
+                }
+            }
+
+            if (!found) {
+                throw new Error(`Could not find a visible date button for day "${dayLabel}" in current or subsequent months.`);
+            }
+        }
+
+        await this.page.locator('html').click();
     }
 
     async getValidationMessage(): Promise<string> {
 
         const toast = this.page.locator('[data-sonner-toast]').first();
+
         if (await toast.isVisible().catch(() => false)) {
             const text = await toast.textContent().catch(() => null);
             const trimmed = text?.trim() || '';
@@ -210,31 +202,24 @@ export class BuyOrderPage {
 
     async resetOrderFormIfVisible() {
 
-        const resetButton = this.page
-            .getByRole('button', {
-                name: /^Reset$/i
-            })
-            .first();
+        const resetButton = this.page.getByRole('button', { name: /^Reset$/i }).first();
 
         const visible = await resetButton.isVisible().catch(() => false);
 
         if (!visible) {
-
             return;
         }
 
         await resetButton.click({ force: true });
-        await this.page.waitForTimeout(300);
     }
 
-    async closeBuyModalIfOpen() {
+    async closeSellModalIfOpen() {
 
-        const buyModal = this.page.locator('form.z-50').first();
+        const sellModal = this.page.locator('form.z-50').first();
 
-        const isOpen = await buyModal.isVisible().catch(() => false);
+        const isOpen = await sellModal.isVisible().catch(() => false);
 
         if (!isOpen) {
-
             return;
         }
 
@@ -243,35 +228,22 @@ export class BuyOrderPage {
             .first();
 
         if (await closeButton.isVisible().catch(() => false)) {
-
             await closeButton.click({ force: true }).catch(() => {});
-            await this.page.waitForTimeout(300);
         }
 
-        if (await buyModal.isVisible().catch(() => false)) {
-
+        if (await sellModal.isVisible().catch(() => false)) {
             await this.page.keyboard.press('Escape').catch(() => {});
-            await this.page.waitForTimeout(300);
         }
 
-        if (await buyModal.isVisible().catch(() => false)) {
-
-            await this.page.keyboard.press('Escape').catch(() => {});
-            await this.page.waitForTimeout(500);
-        }
-
-        await buyModal.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+        await sellModal.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
     }
 
-    async placeBuyOrder() {
+    async placeSellOrder() {
 
-        const buyButton = this.page
-            .getByRole('button', {
-                name: /^Buy$/i
-            });
+        const sellButton = this.page.getByRole('button', { name: /^Sell$/i });
 
-        await buyButton.click();
+        await sellButton.click();
 
-        console.log('Buy order placed');
+        console.log('Sell order placed');
     }
 }
