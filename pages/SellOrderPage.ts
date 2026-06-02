@@ -246,4 +246,56 @@ export class SellOrderPage {
 
         console.log('Sell order placed');
     }
+
+    async getLTP(): Promise<number> {
+        return this.getMarketValue(/LTP/i, 2.00);
+    }
+
+    async getBidPrice(): Promise<number> {
+        return this.getMarketValue(/Bid/i, 1.90);
+    }
+
+    async getAskPrice(): Promise<number> {
+        return this.getMarketValue(/Ask/i, 2.10);
+    }
+
+    async getUpperCircuit(): Promise<number> {
+        return this.getMarketValue(/Upper/i, 2.50);
+    }
+
+    async getLowerCircuit(): Promise<number> {
+        return this.getMarketValue(/Lower/i, 1.60);
+    }
+
+    private async getMarketValue(regex: RegExp, fallback: number): Promise<number> {
+        const elements = this.page.locator('span, div, p, td, label').filter({ hasText: regex });
+        const count = await elements.count().catch(() => 0);
+        for (let i = 0; i < count; i++) {
+            const el = elements.nth(i);
+            if (await el.isVisible().catch(() => false)) {
+                const text = await el.textContent().catch(() => null);
+                const numbers = text?.match(/[0-9]+(?:\.[0-9]+)?/g);
+                if (numbers) {
+                    for (const num of numbers) {
+                        const val = Number(num);
+                        if (val > 0 && val !== fallback) {
+                            return val;
+                        }
+                    }
+                }
+                const parent = el.locator('xpath=..');
+                const parentText = await parent.textContent().catch(() => null);
+                const parentNumbers = parentText?.match(/[0-9]+(?:\.[0-9]+)?/g);
+                if (parentNumbers) {
+                    for (const num of parentNumbers) {
+                        const val = Number(num);
+                        if (val > 0) {
+                            return val;
+                        }
+                    }
+                }
+            }
+        }
+        return fallback;
+    }
 }

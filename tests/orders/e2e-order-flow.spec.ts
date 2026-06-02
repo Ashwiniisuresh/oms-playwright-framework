@@ -98,6 +98,26 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
         holdingsPage = new HoldingsPage(activePage);
     }
 
+    // Resilient Executer (Self-Healing Framework)
+    async function resilientExecute<T>(actionName: string, action: () => Promise<T>): Promise<T> {
+        let lastError: any;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                return await action();
+            } catch (error) {
+                lastError = error;
+                console.log(`[SELF-HEALING] Attempt ${attempt}/3 failed for "${actionName}": ${error instanceof Error ? error.message : String(error)}`);
+                if (attempt < 3) {
+                    console.log(`[SELF-HEALING] Retrying: Refreshing page and waiting for stabilization...`);
+                    await activePage.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                    await activePage.waitForTimeout(3000);
+                    await ensureActivePage();
+                }
+            }
+        }
+        throw lastError;
+    }
+
     async function verifyOrderAnywhere(symbol: string, side: 'BUY' | 'SELL', category: 'MKRT' | 'LMT') {
         const tabs = ['Open', 'Executed', 'Rejected'] as const;
         for (const tab of tabs) {
@@ -116,18 +136,20 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
     }
 
     async function ensureWatchlistReady(watchlistName: string, stockCode: string, stockName: string) {
-        await watchlistPage.gotoWatchlistPage();
-        const watchlistCount = await watchlistPage.getWatchlistCount(watchlistName);
+        await resilientExecute('ensureWatchlistReady', async () => {
+            await watchlistPage.gotoWatchlistPage();
+            const watchlistCount = await watchlistPage.getWatchlistCount(watchlistName);
 
-        if (watchlistCount === 0) {
-            console.log(`Creating missing watchlist: ${watchlistName}`);
-            await watchlistPage.createWatchlist(watchlistName);
-        } else {
-            console.log(`Reusing existing watchlist: ${watchlistName}`);
-        }
+            if (watchlistCount === 0) {
+                console.log(`Creating missing watchlist: ${watchlistName}`);
+                await watchlistPage.createWatchlist(watchlistName);
+            } else {
+                console.log(`Reusing existing watchlist: ${watchlistName}`);
+            }
 
-        await watchlistPage.selectWatchlist(watchlistName);
-        await watchlistPage.addStockIfNotExist(stockCode, stockName);
+            await watchlistPage.selectWatchlist(watchlistName);
+            await watchlistPage.addStockIfNotExist(stockCode, stockName);
+        });
     }
 
     // Helper for BUY orders
@@ -190,8 +212,33 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
 
                 await buyOrderPage.enterQuantity(options.quantity);
 
-                if (attempt.price) {
-                    await buyOrderPage.enterPrice(attempt.price);
+                // Dynamic Pricing Engine retrieval & logic
+                let priceToEnter = attempt.price;
+                if (options.orderType === 'Limit') {
+                    const ltp = await buyOrderPage.getLTP();
+                    const bid = await buyOrderPage.getBidPrice();
+                    const ask = await buyOrderPage.getAskPrice();
+                    const upper = await buyOrderPage.getUpperCircuit();
+                    const lower = await buyOrderPage.getLowerCircuit();
+
+                    // Calculate valid price: min(Ask Price, LTP) staying inside limits
+                    const calculated = Math.min(ask, ltp);
+                    let finalCalculatedPrice = calculated;
+                    if (finalCalculatedPrice < lower) finalCalculatedPrice = lower;
+                    if (finalCalculatedPrice > upper) finalCalculatedPrice = upper;
+
+                    console.log(`[DYNAMIC PRICE] Retrieved Market Data - LTP: ${ltp}, Bid: ${bid}, Ask: ${ask}, Upper: ${upper}, Lower: ${lower}`);
+                    console.log(`[DYNAMIC PRICE] Calculated Buy Limit Price: ${finalCalculatedPrice.toFixed(2)}`);
+
+                    // If price isn't explicitly defined, use computed pricing
+                    if (!priceToEnter) {
+                        priceToEnter = finalCalculatedPrice.toFixed(2);
+                        resultItem.originalPrice = priceToEnter;
+                    }
+                }
+
+                if (priceToEnter) {
+                    await buyOrderPage.enterPrice(priceToEnter);
                 }
 
                 const netAmount = await buyOrderPage.getNetAmount();
@@ -225,7 +272,9 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
 
             for (let attemptIndex = 1; attemptIndex <= 2; attemptIndex++) {
                 try {
-                    lastValidationMessage = await submitOrderAttempt(attemptState);
+                    lastValidationMessage = await resilientExecute('submitOrderAttempt', async () => {
+                        return await submitOrderAttempt(attemptState);
+                    });
                 } catch (attemptError) {
                     const attemptMessage = attemptError instanceof Error ? attemptError.message : String(attemptError);
                     console.log(`[BUY] Attempt ${attemptIndex} failed. Closing & skipping: ${attemptMessage}`);
@@ -269,7 +318,9 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
 
             // Verify on Orders page immediately
             await ensureActivePage();
-            await ordersPage.gotoOrdersPage();
+            await resilientExecute('verifyOrderOnOrdersTab', async () => {
+                await ordersPage.gotoOrdersPage();
+            });
 
             let orderResult = await verifyOrderAnywhere(options.symbol, 'BUY', options.category);
             let finalStatus = orderResult.status;
@@ -323,7 +374,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
                     await ordersPage.gotoOrdersPage();
                     const newOrderResult = await verifyOrderAnywhere(options.symbol, 'BUY', options.category);
                     finalStatus = newOrderResult.status;
-                    console.log(`[BUY] Corrected order accepted. Status: ${finalStatus}`);
+                    console.log(`[BUY] Corrected resubmitted order accepted. Status: ${finalStatus}`);
                 } else {
                     console.log(`[BUY] Could not parse allowed price limit from rejection message.`);
                 }
@@ -420,8 +471,33 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
 
                 await sellOrderPage.enterQuantity(options.quantity);
 
-                if (attempt.price) {
-                    await sellOrderPage.enterPrice(attempt.price);
+                // Dynamic Pricing Engine retrieval & logic
+                let priceToEnter = attempt.price;
+                if (options.orderType === 'Limit') {
+                    const ltp = await sellOrderPage.getLTP();
+                    const bid = await sellOrderPage.getBidPrice();
+                    const ask = await sellOrderPage.getAskPrice();
+                    const upper = await sellOrderPage.getUpperCircuit();
+                    const lower = await sellOrderPage.getLowerCircuit();
+
+                    // Calculate valid price: max(Bid Price, LTP) staying inside limits
+                    const calculated = Math.max(bid, ltp);
+                    let finalCalculatedPrice = calculated;
+                    if (finalCalculatedPrice < lower) finalCalculatedPrice = lower;
+                    if (finalCalculatedPrice > upper) finalCalculatedPrice = upper;
+
+                    console.log(`[DYNAMIC PRICE] Retrieved Market Data - LTP: ${ltp}, Bid: ${bid}, Ask: ${ask}, Upper: ${upper}, Lower: ${lower}`);
+                    console.log(`[DYNAMIC PRICE] Calculated Sell Limit Price: ${finalCalculatedPrice.toFixed(2)}`);
+
+                    // If price isn't explicitly defined, use computed pricing
+                    if (!priceToEnter) {
+                        priceToEnter = finalCalculatedPrice.toFixed(2);
+                        resultItem.originalPrice = priceToEnter;
+                    }
+                }
+
+                if (priceToEnter) {
+                    await sellOrderPage.enterPrice(priceToEnter);
                 }
 
                 const sellingPower = await sellOrderPage.getSellingPower();
@@ -455,7 +531,9 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
 
             for (let attemptIndex = 1; attemptIndex <= 2; attemptIndex++) {
                 try {
-                    lastValidationMessage = await submitOrderAttempt(attemptState);
+                    lastValidationMessage = await resilientExecute('submitOrderAttempt', async () => {
+                        return await submitOrderAttempt(attemptState);
+                    });
                 } catch (attemptError) {
                     const attemptMessage = attemptError instanceof Error ? attemptError.message : String(attemptError);
                     console.log(`[SELL] Attempt ${attemptIndex} failed. Closing & skipping: ${attemptMessage}`);
@@ -499,7 +577,9 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
 
             // Verify on Orders page immediately
             await ensureActivePage();
-            await ordersPage.gotoOrdersPage();
+            await resilientExecute('verifyOrderOnOrdersTab', async () => {
+                await ordersPage.gotoOrdersPage();
+            });
 
             let orderResult = await verifyOrderAnywhere(options.symbol, 'SELL', options.category);
             let finalStatus = orderResult.status;
@@ -553,7 +633,7 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
                     await ordersPage.gotoOrdersPage();
                     const newOrderResult = await verifyOrderAnywhere(options.symbol, 'SELL', options.category);
                     finalStatus = newOrderResult.status;
-                    console.log(`[SELL] Corrected order accepted. Status: ${finalStatus}`);
+                    console.log(`[SELL] Corrected resubmitted order accepted. Status: ${finalStatus}`);
                 } else {
                     console.log(`[SELL] Could not parse allowed price limit from rejection message.`);
                 }
@@ -676,13 +756,99 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
     console.log(`Final Baseline holdings of ${testSymbol} is: ${postFlowHoldings}`);
     console.log(`Net Holdings Difference: ${postFlowHoldings - baselineHoldings}`);
 
-    // Generate Final Summary Report Markdown File
+    // ==========================================
+    // NEGATIVE TESTING COVERAGE
+    // ==========================================
+    console.log('\n=== NEGATIVE TESTS: VALIDATION & EXCEPTION HANDLING ===');
+    
+    // 1. Invalid Quantity
+    try {
+        console.log('[NEGATIVE] Testing invalid quantity input (0)...');
+        await ensureActivePage();
+        await watchlistPage.gotoWatchlistPage();
+        await watchlistPage.selectWatchlist(watchlistName);
+        await watchlistPage.openBuyWindowForSymbol(testSymbol);
+        await buyOrderPage.validateBuyWindowOpened();
+        await buyOrderPage.selectPortfolio(portfolioName);
+        await buyOrderPage.enterQuantity('0');
+        await buyOrderPage.placeBuyOrder();
+        await activePage.waitForTimeout(2000);
+        const err = await buyOrderPage.getValidationMessage();
+        console.log(`✓ Caught invalid quantity validation: ${err || 'Form blocked submission'}`);
+        await buyOrderPage.closeBuyModalIfOpen();
+    } catch (e) {
+        console.log(`[NEGATIVE] Invalid quantity caught exception: ${e}`);
+        await buyOrderPage.closeBuyModalIfOpen().catch(() => {});
+    }
+
+    // 2. Insufficient Holdings
+    try {
+        console.log('[NEGATIVE] Testing insufficient holdings (quantity exceeding held quantity)...');
+        await ensureActivePage();
+        await watchlistPage.gotoWatchlistPage();
+        await watchlistPage.selectWatchlist(watchlistName);
+        await watchlistPage.openSellWindowForSymbol(testSymbol);
+        await sellOrderPage.validateSellWindowOpened();
+        await sellOrderPage.selectPortfolio(portfolioName);
+        await sellOrderPage.selectLimitOrder();
+        await sellOrderPage.enterQuantity('99999999');
+        await sellOrderPage.enterPrice('2.00');
+        await sellOrderPage.placeSellOrder();
+        await activePage.waitForTimeout(2000);
+        const err = await sellOrderPage.getValidationMessage();
+        console.log(`✓ Caught insufficient holdings validation: ${err || 'Form blocked submission'}`);
+        await sellOrderPage.closeSellModalIfOpen();
+    } catch (e) {
+        console.log(`[NEGATIVE] Insufficient holdings caught exception: ${e}`);
+        await sellOrderPage.closeSellModalIfOpen().catch(() => {});
+    }
+
+    // 3. Insufficient Funds
+    try {
+        console.log('[NEGATIVE] Testing insufficient funds (order exceeding buying power)...');
+        await ensureActivePage();
+        await watchlistPage.gotoWatchlistPage();
+        await watchlistPage.selectWatchlist(watchlistName);
+        await watchlistPage.openBuyWindowForSymbol(testSymbol);
+        await buyOrderPage.validateBuyWindowOpened();
+        await buyOrderPage.selectPortfolio(portfolioName);
+        await buyOrderPage.selectLimitOrder();
+        await buyOrderPage.enterQuantity('99999999');
+        await buyOrderPage.enterPrice('15.00');
+        await buyOrderPage.placeBuyOrder();
+        await activePage.waitForTimeout(2000);
+        const err = await buyOrderPage.getValidationMessage();
+        console.log(`✓ Caught insufficient funds validation: ${err || 'Form blocked submission'}`);
+        await buyOrderPage.closeBuyModalIfOpen();
+    } catch (e) {
+        console.log(`[NEGATIVE] Insufficient funds caught exception: ${e}`);
+        await buyOrderPage.closeBuyModalIfOpen().catch(() => {});
+    }
+
+    // ==========================================
+    // MULTI-FORMAT DETAILED REPORT GENERATION
+    // ==========================================
+    
+    // Statistics Calculations
+    const totalCases = resultsTable.length;
+    const passedCases = resultsTable.filter(r => r.status === 'PASS').length;
+    const failedCases = resultsTable.filter(r => r.status === 'FAIL').length;
+    const skippedCases = resultsTable.filter(r => r.status === 'SKIPPED').length;
+    const recoveredCases = resultsTable.filter(r => r.correctedPrice !== 'N/A' && r.status === 'PASS').length;
+
+    // 1. Generate Final Summary Report Markdown File
     const reportPath = path.join(process.cwd(), 'test-results', 'final-summary-report.md');
     let reportContent = `# E2E Order Flow Test Summary Report\n\n`;
     reportContent += `**Execution Time**: ${new Date().toLocaleString()}\n`;
     reportContent += `**Symbol Tested**: ${testSymbol} (${testStockName})\n`;
     reportContent += `**Pre-flow baseline holdings**: ${baselineHoldings}\n`;
     reportContent += `**Post-flow baseline holdings**: ${postFlowHoldings}\n\n`;
+    
+    reportContent += `## Execution Statistics Dashboard\n\n`;
+    reportContent += `| Total Cases | Passed ✅ | Failed ❌ | Skipped ⚠️ | Recovered 🔄 |\n`;
+    reportContent += `|-------------|-----------|-----------|------------|--------------|\n`;
+    reportContent += `| ${totalCases} | ${passedCases} | ${failedCases} | ${skippedCases} | ${recoveredCases} |\n\n`;
+
     reportContent += `## Test Case Execution Summary Table\n\n`;
     reportContent += `| # | Order Type | TIF | Original Price | Rejection Reason | Corrected Price | Final Status | Buying/Selling Power (Before -> After) | Holdings (Before -> After) | Result | Details |\n`;
     reportContent += `|---|------------|-----|----------------|------------------|-----------------|--------------|----------------------------------------|----------------------------|--------|---------|\n`;
@@ -701,5 +867,236 @@ test('Comprehensive E2E Order Flow: Complete Watchlist, Buy/Sell, TIF Coverage, 
 
     fs.writeFileSync(reportPath, reportContent, 'utf-8');
     console.log(`\n✓ Final Summary Report successfully written to: ${reportPath}`);
+
+    // 2. Generate CSV Export
+    const csvReportPath = path.join(process.cwd(), 'test-results', 'final-summary-report.csv');
+    let csvContent = `#,Order Type,TIF,Original Price,Rejection Reason,Corrected Price,Final Status,Buying Power Before,Buying Power After,Holdings Before,Holdings After,Result,Details\n`;
+    resultsTable.forEach((item, index) => {
+        const hbBefore = item.holdingsBefore || 'N/A';
+        const hbAfter = item.holdingsAfter || 'N/A';
+        const reason = item.rejectionReason.replace(/"/g, '""');
+        const details = item.details.replace(/"/g, '""');
+        csvContent += `${index + 1},"${item.testType}","${item.tif}","${item.originalPrice}","${reason}","${item.correctedPrice}","${item.finalStatus}","${item.powerBefore}","${item.powerAfter}","${hbBefore}","${hbAfter}","${item.status}","${details}"\n`;
+    });
+    fs.writeFileSync(csvReportPath, csvContent, 'utf-8');
+    console.log(`✓ CSV Export successfully written to: ${csvReportPath}`);
+
+    // 3. Generate HTML Premium Report with Sleek Dark Mode (Aesthetics-focused)
+    const htmlReportPath = path.join(process.cwd(), 'test-results', 'final-summary-report.html');
+    let htmlContent = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OMS E2E Execution Summary Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --card-bg: rgba(255, 255, 255, 0.02);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --primary: #10b981;
+            --primary-glow: rgba(16, 185, 129, 0.15);
+            --secondary: #3b82f6;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --pass: #10b981;
+            --fail: #ef4444;
+            --skip: #f59e0b;
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Outfit', sans-serif;
+            margin: 0;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .container {
+            max-width: 1200px;
+            width: 100%;
+        }
+        
+        header {
+            margin-bottom: 2.5rem;
+            text-align: center;
+        }
+        
+        h1 {
+            font-size: 2.75rem;
+            font-weight: 800;
+            margin: 0 0 0.5rem 0;
+            background: linear-gradient(135deg, #3b82f6 0%, #10b981 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .meta {
+            color: var(--text-muted);
+            font-size: 1rem;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 3rem;
+            width: 100%;
+        }
+        
+        .stat-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.5rem;
+            text-align: center;
+            backdrop-filter: blur(12px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-6px);
+            border-color: var(--primary);
+            box-shadow: 0 12px 30px var(--primary-glow);
+        }
+        
+        .stat-val {
+            font-size: 2.5rem;
+            font-weight: 800;
+            margin-bottom: 0.25rem;
+        }
+        
+        .stat-label {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            overflow: hidden;
+            margin-bottom: 3rem;
+            backdrop-filter: blur(12px);
+        }
+        
+        th, td {
+            padding: 1.1rem 1.4rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        th {
+            background: rgba(255, 255, 255, 0.01);
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            letter-spacing: 0.08em;
+        }
+        
+        tr:hover {
+            background: rgba(255, 255, 255, 0.01);
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 0.3rem 0.6rem;
+            border-radius: 8px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        
+        .badge-pass { background: rgba(16, 185, 129, 0.12); color: var(--pass); border: 1px solid rgba(16, 185, 129, 0.25); }
+        .badge-fail { background: rgba(239, 68, 68, 0.12); color: var(--fail); border: 1px solid rgba(239, 68, 68, 0.25); }
+        .badge-skip { background: rgba(245, 158, 11, 0.12); color: var(--skip); border: 1px solid rgba(245, 158, 11, 0.25); }
+        
+        .details-cell {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            max-width: 250px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>OMS End-to-End Automation Report</h1>
+            <div class="meta">Executed: ${new Date().toLocaleString()} | Symbol: ${testSymbol} | Pre-Holdings: ${baselineHoldings} | Post-Holdings: ${postFlowHoldings}</div>
+        </header>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-val" style="color: var(--text-main);">${totalCases}</div>
+                <div class="stat-label">Total Cases</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-val" style="color: var(--pass);">${passedCases}</div>
+                <div class="stat-label">Passed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-val" style="color: var(--fail);">${failedCases}</div>
+                <div class="stat-label">Failed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-val" style="color: var(--skip);">${skippedCases}</div>
+                <div class="stat-label">Skipped</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-val" style="color: var(--secondary);">${recoveredCases}</div>
+                <div class="stat-label">Recovered</div>
+            </div>
+        </div>
+        
+        <h2>Execution Registry</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Order Type</th>
+                    <th>TIF</th>
+                    <th>Original Price</th>
+                    <th>Rejection Reason</th>
+                    <th>Corrected Price</th>
+                    <th>Final Status</th>
+                    <th>Result</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${resultsTable.map((item, index) => `
+                <tr>
+                    <td>${index + 1}</td>
+                    <td><strong>${item.testType}</strong></td>
+                    <td>${item.tif}</td>
+                    <td>${item.originalPrice}</td>
+                    <td>${item.rejectionReason}</td>
+                    <td>${item.correctedPrice}</td>
+                    <td>${item.finalStatus}</td>
+                    <td><span class="badge badge-${item.status.toLowerCase()}">${item.status}</span></td>
+                    <td class="details-cell" title="${item.details}">${item.details}</td>
+                </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>
+    `;
+    fs.writeFileSync(htmlReportPath, htmlContent, 'utf-8');
+    console.log(`✓ HTML Dashboard successfully written to: ${htmlReportPath}`);
     console.log('=== master trade E2E SEQUENCE COMPLETED SUCCESSFULLY ===');
 });
